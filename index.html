@@ -1,0 +1,111 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>P2P File Transfer</title>
+    <script>
+        const signalingServer = new WebSocket("ws://192.168.1.105:8080"); // Replace with your laptop's local IP
+        let peerConnection;
+        let dataChannel;
+
+        function setupPeerConnection() {
+            peerConnection = new RTCPeerConnection({
+                iceServers: [{ urls: "stun:stun.l.google.com:19302" }] // Public STUN Server
+            });
+
+            dataChannel = peerConnection.createDataChannel("fileTransfer");
+            dataChannel.binaryType = "arraybuffer";
+
+            dataChannel.onopen = () => console.log("✅ Data Channel Opened");
+            dataChannel.onmessage = (event) => receiveFile(event.data);
+
+            peerConnection.onicecandidate = (event) => {
+                if (event.candidate) {
+                    signalingServer.send(JSON.stringify({ candidate: event.candidate }));
+                }
+            };
+
+            peerConnection.ondatachannel = (event) => {
+                dataChannel = event.channel;
+                dataChannel.binaryType = "arraybuffer";
+                dataChannel.onmessage = (event) => receiveFile(event.data);
+            };
+        }
+
+        signalingServer.onmessage = async (event) => {
+            try {
+                const data = JSON.parse(event.data);
+                console.log("📩 Received WebSocket message:", data);
+
+                if (data.sdp) {
+                    console.log("📡 Received SDP:", data.sdp);
+                    await peerConnection.setRemoteDescription(new RTCSessionDescription(data.sdp));
+                    if (data.sdp.type === "offer") {
+                        const answer = await peerConnection.createAnswer();
+                        await peerConnection.setLocalDescription(answer);
+                        signalingServer.send(JSON.stringify({ sdp: answer }));
+                    }
+                } else if (data.candidate) {
+                    console.log("🧊 Received ICE Candidate:", data.candidate);
+                    await peerConnection.addIceCandidate(new RTCIceCandidate(data.candidate));
+                }
+            } catch (error) {
+                console.error("❌ WebSocket message processing error:", error);
+            }
+        };
+
+        async function createOffer() {
+            setupPeerConnection();
+            const offer = await peerConnection.createOffer();
+            await peerConnection.setLocalDescription(offer);
+            signalingServer.send(JSON.stringify({ sdp: offer }));
+        }
+
+        function sendFile() {
+            const fileInput = document.getElementById("fileInput").files[0];
+            if (!fileInput || dataChannel.readyState !== "open") {
+                alert("No file selected or connection not open");
+                return;
+            }
+
+            const reader = new FileReader();
+            reader.onload = () => {
+                console.log(`📤 Sending File: ${fileInput.name}`);
+                dataChannel.send(JSON.stringify({ filename: fileInput.name, type: fileInput.type }));
+                dataChannel.send(reader.result); // Send file data
+            };
+            reader.readAsArrayBuffer(fileInput);
+        }
+
+        function receiveFile(data) {
+            try {
+                if (typeof data === "string") {
+                    const fileInfo = JSON.parse(data);
+                    console.log(`📩 Receiving File: ${fileInfo.filename}, Type: ${fileInfo.type}`);
+                    window.receivedFileInfo = fileInfo; // Store file info temporarily
+                } else {
+                    console.log("📥 File Data Received");
+                    const blob = new Blob([data], { type: window.receivedFileInfo.type });
+                    const url = window.URL.createObjectURL(blob);
+                    const a = document.createElement("a");
+                    a.href = url;
+                    a.download = window.receivedFileInfo.filename;
+                    document.body.appendChild(a);
+                    a.click();
+                    document.body.removeChild(a);
+                    console.log("✅ File Downloaded");
+                }
+            } catch (error) {
+                console.error("❌ Error processing received file:", error);
+            }
+        }
+    </script>
+</head>
+<body>
+    <h2>P2P File Transfer (Phone ↔ Laptop)</h2>
+    <input type="file" id="fileInput">
+    <button onclick="sendFile()">Send File</button>
+    <button onclick="createOffer()">Connect to Peer</button>
+</body>
+</html>
